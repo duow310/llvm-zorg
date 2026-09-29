@@ -7,7 +7,7 @@ class ClangBuilder implements Serializable {
         this.script = script
     }
 
-    def checkoutStage(zorgBranch) {
+    def checkoutStage(zorgBranch, testSourceBranch = null) {
         script.sh "rm -rf '${script.env.CLANG_CRASH_DIAGNOSTICS_DIR}'"
         script.sh "rm -rf '${script.env.CLANG_CRASH_DIAGNOSTICS_DIR}.zip'"
         script.sh "mkdir -p '${script.env.CLANG_CRASH_DIAGNOSTICS_DIR}'"
@@ -29,6 +29,16 @@ class ClangBuilder implements Serializable {
                         extensions: [[$class: 'CloneOption', timeout: 30]],
                         userRemoteConfigs: [[url: 'https://github.com/llvm/llvm-project.git']]
                     ])
+                } else if (testSourceBranch) {
+                    // TEST ONLY: The -apple-silicon test copies are plain
+                    // pipeline jobs whose script comes from a fork, so build
+                    // (and poll) the upstream branch explicitly.
+                    script.checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${testSourceBranch}"]],
+                        extensions: [[$class: 'CloneOption', timeout: 30]],
+                        userRemoteConfigs: [[url: 'https://github.com/llvm/llvm-project.git']]
+                    ])
                 } else {
                     // Multibranch pipeline - use the SCM configuration from the job which includes timeout
                     script.checkout(script.scm)
@@ -36,7 +46,8 @@ class ClangBuilder implements Serializable {
             }
         }
         script.dir('llvm-zorg') {
-            script.checkout([
+            // TEST ONLY: Do not start test copy builds on llvm-zorg commits.
+            script.checkout(poll: false, scm: [
                 $class: 'GitSCM',
                 branches: [[name: zorgBranch]],
                 userRemoteConfigs: [[url: 'https://github.com/llvm/llvm-zorg.git']]

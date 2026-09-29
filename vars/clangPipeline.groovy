@@ -8,12 +8,19 @@ def call(Map config = [:]) {
     def stagesToRun = config.stages ?: ['checkout', 'fetch', 'build', 'test']
     def jobName = config.jobName
     def zorgBranch = config.zorgBranch
+    // TEST ONLY: Upstream llvm-project branch to build instead of the job's SCM.
+    def testSourceBranch = config.testSourceBranch
 
     def pipelineProperties = [
         buildDiscarder(logRotator(numToKeepStr: '30'))
     ]
     if (!params.IS_BISECT_JOB) {
         pipelineProperties.add(disableConcurrentBuilds())
+    }
+    // TEST ONLY: Poll schedule for the -apple-silicon test copies. Declared
+    // here so that the properties step below does not drop the trigger.
+    if (config.testPollSpec) {
+        pipelineProperties.add(pipelineTriggers([pollSCM(config.testPollSpec)]))
     }
     properties(pipelineProperties)
 
@@ -63,7 +70,7 @@ def call(Map config = [:]) {
                 steps {
                     script {
                         retry(3) {
-                            builder.checkoutStage(zorgBranch)
+                            builder.checkoutStage(zorgBranch, testSourceBranch)
                         }
                     }
                 }
