@@ -245,7 +245,12 @@ all = [
     'tags'  : ["clang", "lld", "LTO"],
     'workernames' : ["as-worker-92"],
     'builddir': "clang-with-thin-lto-ubuntu-rel",
-    'factory' : ClangLTOBuilder.getClangWithLTOBuildFactory(jobs=72, lto='thin')},
+    'factory' : ClangLTOBuilder.getClangWithLTOBuildFactory(
+                    jobs=72,
+                    lto='thin',
+                    extra_configure_args=[
+                        '-DCLANG_ENABLE_CIR=OFF',
+                    ])},
 
     {'name' : "clang-with-lto-ubuntu-release",
     'tags'  : ["clang", "lld", "LTO"],
@@ -286,6 +291,7 @@ all = [
                     extra_configure_args=[
                         "-DCMAKE_BUILD_TYPE=Release",
                         "-DCLANG_ENABLE_ARCMT=OFF",
+                        "-DCLANG_ENABLE_CIR=OFF",
                         "-DCLANG_ENABLE_CLANGD=OFF",
                         "-DLLVM_CCACHE_BUILD=ON",
                         "-DLLVM_DEFAULT_TARGET_TRIPLE=x86_64-sie-ps5",
@@ -307,6 +313,7 @@ all = [
                         "-DCMAKE_C_COMPILER=gcc",
                         "-DCMAKE_CXX_COMPILER=g++",
                         "-DCMAKE_BUILD_TYPE=Release",
+                        "-DCLANG_ENABLE_CIR=OFF",
                         "-DCLANG_ENABLE_CLANGD=OFF",
                         "-DLLVM_BUILD_RUNTIME=ON",
                         "-DLLVM_BUILD_TESTS=ON",
@@ -326,6 +333,7 @@ all = [
                         "-DCMAKE_C_COMPILER=clang",
                         "-DCMAKE_CXX_COMPILER=clang++",
                         "-DCMAKE_BUILD_TYPE=Release",
+                        "-DCLANG_ENABLE_CIR=OFF",
                         "-DLLVM_BUILD_TESTS=ON",
                         "-DLLVM_CCACHE_BUILD=ON",
                         "-DLLVM_ENABLE_ASSERTIONS=ON",

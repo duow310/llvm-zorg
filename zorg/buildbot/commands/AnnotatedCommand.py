@@ -56,6 +56,8 @@
 
 import re
 
+from typing import Any, cast
+
 from twisted.internet import defer
 from twisted.internet import error
 from twisted.python import failure
@@ -78,8 +80,9 @@ else:
 class AnnotatedBuildStep(buildstep.BuildStep):
 
     def  __init__(self, parent_step, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
         self.parent_step = parent_step
-        buildstep.BuildStep.__init__(self, *args, **kwargs)
 
         # Step is really unpredictable
         self.useProgress = False
@@ -87,6 +90,10 @@ class AnnotatedBuildStep(buildstep.BuildStep):
         self.build = self.parent_step.build
         self.master = self.parent_step.build.master
         self.worker = self.parent_step.worker
+
+        # Init result to SUCCESS by default.
+        self.results = results.SUCCESS
+        self.description = [self.name]
 
         self.stdio_log = None
 
@@ -102,9 +109,6 @@ class AnnotatedBuildStep(buildstep.BuildStep):
         yield buildstep.BuildStep.addStep(self)
         # Put ourselves into a list of processed steps of the build object.
         self.build.executedSteps.append(self)
-        # Init result to SUCCESS by default.
-        self.results = results.SUCCESS
-        self.description = [self.name]
         self.stdio_log = yield self.addLog('stdio')
 
         debuglog("AnnotatedBuildStep: added step '{}': stepid={}, buildid={}".format(
@@ -401,7 +405,17 @@ class AnnotatedCommand(buildstep.ShellMixin, buildstep.BuildStep):
 
         self._fixupActiveAnnotatedStep()
 
-        s = AnnotatedBuildStep(parent_step=self, name=name)
+        # Buildbot >= 4
+        if hasattr(buildstep, "create_step_from_step_or_factory"):
+            s = cast(
+                AnnotatedBuildStep,
+                buildstep.create_step_from_step_or_factory(
+                    AnnotatedBuildStep(parent_step=self, name=name)
+                ),
+            )
+        else:
+            s = AnnotatedBuildStep(parent_step=self, name=name)
+
         # Doing this last so that @@@BUILD_STEP... occurs in the log of the new
         # step.
         s.scheduleStdout(logline)

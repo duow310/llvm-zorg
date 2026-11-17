@@ -7,7 +7,7 @@ import re
 import subprocess
 import time
 from collections.abc import Sequence
-from typing import Tuple, Type
+from typing import Literal, Tuple, Type
 
 import git
 import github
@@ -58,12 +58,55 @@ def call_with_retry(exceptions : RetryExceptions, func, *args, **kwargs):
             val_delay *= BACKOFF
 
 
-@dataclasses.dataclass
-class BazelBuildResult:
-    success: bool
+@dataclasses.dataclass(frozen=True)
+class BazelBuildConfig:
+    """A Bazel invocation that CI runs and that the bot must keep passing."""
+
+    # Name of the configuration.
+    name: str
+
+    # Arguments (flags and targets) passed to the bazel-build scripts.
+    args: Tuple[str, ...]
+
+
+# These must stay in sync with the Bazel invocations run by buildkite.
+BAZEL_BUILD_CONFIGS: Tuple[BazelBuildConfig, ...] = (
+    BazelBuildConfig(
+        name="default",
+        args=(
+            "//...",
+            "@llvm-project//...",
+        ),
+    ),
+    BazelBuildConfig(
+        name="llvm_libc_fullbuild",
+        args=(
+            "--@llvm-project//libc:build_mode=full",
+            "@llvm-project//libc/...",
+        ),
+    ),
+)
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class BazelBuildSuccess:
+    """A successful build result."""
+
+    success: Literal[True] = dataclasses.field(default=True, init=False)
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class BazelBuildFailure:
+    """The outputs of failed build result."""
+
+    success: Literal[False] = dataclasses.field(default=False, init=False)
     stdout: str = ""
     stderr: str = ""
-    time_taken: float = 0.0
+    config: BazelBuildConfig
+
+
+# Result of a Bazel build. Check `result.success` to narrow the type.
+BazelBuildResult = BazelBuildSuccess | BazelBuildFailure
 
 
 class CredentialManager:
@@ -106,13 +149,31 @@ class CommandProcessor:
     def bazel_build_in_kubernetes(self) -> bool:
         return os.getenv("POD_NAME") is not None
 
-    def run_bazel_build(self) -> BazelBuildResult:
-        """
-        Runs the bazel build command in the given repository path for specific targets.
-
+    def run_bazel_build(
+        self,
+        configs: Sequence[BazelBuildConfig] = BAZEL_BUILD_CONFIGS,
+    ) -> BazelBuildResult:
+        """Runs the bazel build for each of the given configurations.
+ 
         Returns:
-            BazelBuildResult containing status, stdout, stderr, and time taken.
+            BazelBuildSuccess if every config built,
+            otherwise the BazelBuildFailure for the first config that failed.
         """
+        for config in configs:
+            result = self._run_bazel_build_with_config(config)
+            if not result.success:
+                # TODO: Consider building for every config and returning all
+                # failures. If there are distinct failures in multiple configs,
+                # the bant fixer probably won't succeed because it only makes
+                # one attempt at fixing the build based on this output.
+                return result
+        return BazelBuildSuccess()
+
+    def _run_bazel_build_with_config(
+        self,
+        config: BazelBuildConfig,
+    ) -> BazelBuildResult:
+        """Runs the bazel build for a single configuration."""
         try:
             bazel_build_file = (
                 "bazel-build-ci" if self.bazel_build_in_kubernetes() else "bazel-build"
@@ -120,35 +181,41 @@ class CommandProcessor:
             base_path = os.path.dirname(os.path.abspath(__file__))
             bazel_build_path = os.path.join(base_path, bazel_build_file)
 
-            logger.info("Running bazel build...")
+            env = os.environ.copy()
+            env["BAZEL_OUTPUT_BASE"] = f"/tmp/bazel_build_{config.name}"
+
+            logger.info(f"Running bazel build ({config.name})...")
             start_time = time.time()
             result = subprocess.run(
-                [bazel_build_path],
+                [bazel_build_path, *config.args],
                 cwd=os.path.join(self.repo_path, self.BazelPath),
+                env=env,
                 capture_output=True,
                 text=True,
                 timeout=1800,  # 30 minutes
             )
             end_time = time.time()
             time_taken = end_time - start_time
-            logger.info(f"Bazel build took {time_taken} seconds.")
-            return BazelBuildResult(
-                success=result.returncode == 0,
+            logger.info(f"Bazel build ({config.name}) took {time_taken} seconds.")
+            if result.returncode == 0:
+                return BazelBuildSuccess()
+            return BazelBuildFailure(
                 stdout=result.stdout,
                 stderr=result.stderr,
-                time_taken=time_taken,
+                config=config,
             )
 
         except subprocess.TimeoutExpired:
-            return BazelBuildResult(success=False, stderr="Timeout", time_taken=1800)
+            return BazelBuildFailure(stderr="Timeout", config=config)
         except FileNotFoundError:
-            return BazelBuildResult(
-                success=False,
+            return BazelBuildFailure(
                 stderr="Error: 'bazel' command not found. Please ensure Bazel is installed.",
+                config=config,
             )
         except Exception as e:
-            return BazelBuildResult(
-                success=False, stderr=f"Error running bazel build: {str(e)}"
+            return BazelBuildFailure(
+                stderr=f"Error running bazel build: {str(e)}",
+                config=config,
             )
 
     def run_buildifier(self, files: Sequence[str]) -> bool:
@@ -235,6 +302,7 @@ class LocalGitRepo:
             git.Repo.clone_from(
                 f"https://github.com/{self.creds.gh_fork_repo_name}.git",
                 self.repo_path,
+                env={"GIT_DEFAULT_REF_FORMAT": "files"},
             )
         self.repo = git.Repo(repo_path)
 
@@ -292,16 +360,41 @@ class LocalGitRepo:
             self.repo.remotes.origin.fetch
         )
         self.repo.git.reset("--hard", f"{self.remote_name}/{self.main_branch}")
-
         return self.repo.head.commit.hexsha
 
     def diff(self) -> str:
         return self.repo.git.diff(None)
 
-    def create_branch_for_fix(self, commit_hash: str) -> None:
-        """Prepares the local git repository for applying fixes."""
-        self.checkout_commit(commit_hash)
-        self.repo.create_head(self.get_branch_name(commit_hash), force=True).checkout()
+    def create_branch_for_fix(self, commit_hash: str) -> str:
+        """Prepares the local git repository for applying fixes from current HEAD."""
+        branch_name = self.get_branch_name(commit_hash)
+        self.repo.create_head(branch_name, force=True).checkout()
+        return branch_name
+
+    def rebase_branch(
+        self, branch_name: str, new_base: str, strategy_option: str = "ours"
+    ) -> bool:
+        """Rebases branch_name onto new_base. Returns True on success, False on conflict/error."""
+        try:
+            self.repo.git.checkout("-f", branch_name)
+            self.repo.git.clean("-fd")
+            self.repo.git.rebase("-X", strategy_option, new_base)
+            return True
+        except git.GitCommandError as e:
+            logger.error(f"Failed to rebase {branch_name} onto {new_base}: {e}")
+            try:
+                self.repo.git.rebase("--abort")
+            except git.GitCommandError:
+                pass
+            return False
+
+    def reset_hard(self, commit_or_branch: str | None = None) -> None:
+        """Hard resets the repository and cleans untracked files."""
+        if commit_or_branch:
+            self.repo.git.reset("--hard", commit_or_branch)
+        else:
+            self.repo.git.reset("--hard")
+        self.repo.git.clean("-fd")
 
     def checkout_commit(self, commit_hash: str):
         """Prepares the local git repository for applying fixes."""
@@ -316,7 +409,6 @@ class LocalGitRepo:
     def is_repo_dirty(self, untracked_files=False) -> bool:
         return self.repo.is_dirty(untracked_files=untracked_files)
 
-    # This needs to be revisited when we have support for nested failures.
     def close_existing_prs(self) -> None:
         for open_pr in self.gh_pr_repo.get_issues(
             creator=self.gh_pr_creator, state="open"
@@ -328,6 +420,7 @@ class LocalGitRepo:
         self,
         build_data: "BuildInfo",
         create_pr: bool | None = None,
+        close_existing_prs: bool = True,
     ) -> bool:
         """Pushes the branch and creates a GitHub PR against it."""
         if create_pr is None:
@@ -384,13 +477,14 @@ class LocalGitRepo:
             return True
 
         # 4. Close existing PRs (if any)
-        try:
-            call_with_retry(
-                (github.GithubException,),
-                self.close_existing_prs,
-            )
-        except github.GithubException as e:
-            logger.warning(f"Failed to close existing PRs: {e}. Proceeding anyway.")
+        if close_existing_prs:
+            try:
+                call_with_retry(
+                    (github.GithubException,),
+                    self.close_existing_prs,
+                )
+            except github.GithubException as e:
+                logger.warning(f"Failed to close existing PRs: {e}. Proceeding anyway.")
 
         # 5. Create new Pull Request
         logger.info(
@@ -470,10 +564,12 @@ class LocalBuildProcessor(BuildProcessor):
         """Get the latest build status by running bazel build locally."""
         latest_sha = self.git_repo.refresh_main_branch()
         result = self.cmd_processor.run_bazel_build()
+        if result.success:
+            return BuildInfo(commit=latest_sha, state=BuildState.PASSED)
 
         return BuildInfo(
             commit=latest_sha,
-            state=BuildState.PASSED if result.success else BuildState.FAILED,
+            state=BuildState.FAILED,
             failed_targets=parse_targets(result.stderr),
         )
 

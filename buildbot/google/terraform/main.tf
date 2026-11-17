@@ -16,7 +16,6 @@ provider "google" {
   region  = var.gcp_config.region
 }
 
-
 # create a network for the cluster, required for Kubernetes on Windows 
 # FIXME: rename to "buildbot-vpc-network", causes destruction of the cluster!
 resource "google_compute_network" "vpc_network" {
@@ -34,8 +33,8 @@ resource "google_container_cluster" "primary" {
   # enable alias IP addresses, required for Kubernetes for Windows
   ip_allocation_policy {}
 
-  # use newer Kubernetes version, otherwise Windows node pools can't be created
-  min_master_version = "1.16"
+  # Keep around for now to avoid updates to the cluster.
+  enable_shielded_nodes = false
 
   # one node is enough (at the moment)
   initial_node_count = 1
@@ -83,4 +82,183 @@ resource "google_container_node_pool" "linux_16_core_pool" {
       pool = "linux-16-core-pool"
     }
   }
+}
+
+data "google_secret_manager_secret_version" "password_clangd_ubuntu_clang" {
+  secret = "password-clangd-ubuntu-clang"
+}
+
+data "google_client_config" "current" {}
+
+provider "kubernetes" {
+  host  = "https://${google_container_cluster.primary.endpoint}"
+  token = data.google_client_config.current.access_token
+  cluster_ca_certificate = base64decode(
+    google_container_cluster.primary.master_auth[0].cluster_ca_certificate
+  )
+}
+
+resource "kubernetes_secret" "clangd_ubuntu_clang_password" {
+  metadata {
+    name = "password-clangd-ubuntu-clang"
+  }
+
+  data = {
+    "token" = data.google_secret_manager_secret_version.password_clangd_ubuntu_clang.secret_data
+  }
+
+  type = "Opaque"
+}
+
+resource "kubernetes_manifest" "clang_debian_cpp20" {
+  manifest = yamldecode(file("${path.module}/deployment-clang-debian-cpp20.yaml"))
+}
+
+resource "kubernetes_manifest" "clangd_ubuntu_clang" {
+  manifest = yamldecode(file("${path.module}/deployment-clangd-ubuntu-clang.yaml"))
+}
+
+data "google_compute_zones" "available" {
+  region = var.gcp_config.region
+  status = "UP"
+}
+
+resource "google_container_node_pool" "linux_32_core_pool" {
+  name           = "linux-32-core-pool"
+  location       = var.gcp_config.zone_a
+  cluster        = google_container_cluster.primary.name
+  node_locations = data.google_compute_zones.available.names
+
+  autoscaling {
+    total_min_node_count = 0
+    total_max_node_count = 4
+    location_policy      = "ANY"
+  }
+
+  node_config {
+    preemptible  = true
+    machine_type = "n2d-standard-32"
+    disk_size_gb = 100
+    disk_type    = "pd-ssd"
+
+    labels = {
+      pool = "linux-32-core-pool"
+    }
+  }
+}
+
+data "google_secret_manager_secret_version" "password_profcheck_b1" {
+  secret = "profcheck-b1"
+}
+
+data "google_secret_manager_secret_version" "password_profcheck_b2" {
+  secret = "profcheck-b2"
+}
+
+resource "kubernetes_secret" "password_profcheck_b1" {
+  metadata {
+    name = "password-profcheck-b1"
+  }
+
+  data = {
+    "password" = data.google_secret_manager_secret_version.password_profcheck_b1.secret_data
+  }
+
+  type = "Opaque"
+}
+
+resource "kubernetes_secret" "password_profcheck_b2" {
+  metadata {
+    name = "password-profcheck-b2"
+  }
+
+  data = {
+    "password" = data.google_secret_manager_secret_version.password_profcheck_b2.secret_data
+  }
+
+  type = "Opaque"
+}
+
+resource "kubernetes_manifest" "profcheck_b1_deployment" {
+  manifest = yamldecode(
+    templatefile("profcheck_deployment.yaml", {
+      buildbot_name : "profcheck-b1",
+      secret_name : "password-profcheck-b1"
+    })
+  )
+
+  depends_on = [
+    kubernetes_secret.password_profcheck_b1
+  ]
+}
+
+resource "kubernetes_manifest" "profcheck_b2_deployment" {
+  manifest = yamldecode(
+    templatefile("profcheck_deployment.yaml", {
+      buildbot_name : "profcheck-b2",
+      secret_name : "password-profcheck-b2"
+    })
+  )
+
+  depends_on = [
+    kubernetes_secret.password_profcheck_b2
+  ]
+}
+
+data "google_secret_manager_secret_version" "password_google_integrate_b1" {
+  secret = "google-integrate-b1"
+}
+
+data "google_secret_manager_secret_version" "password_google_integrate_b2" {
+  secret = "google-integrate-b2"
+}
+
+resource "kubernetes_secret" "password_google_integrate_b1" {
+  metadata {
+    name = "password-google-integrate-b1"
+  }
+
+  data = {
+    "password" = data.google_secret_manager_secret_version.password_google_integrate_b1.secret_data
+  }
+
+  type = "Opaque"
+}
+
+resource "kubernetes_secret" "password_google_integrate_b2" {
+  metadata {
+    name = "password-google-integrate-b2"
+  }
+
+  data = {
+    "password" = data.google_secret_manager_secret_version.password_google_integrate_b2.secret_data
+  }
+
+  type = "Opaque"
+}
+
+resource "kubernetes_manifest" "google_integrate_b1_deployment" {
+  manifest = yamldecode(
+    templatefile("google_integrate_deployment.yaml", {
+      buildbot_name : "google-integrate-b1",
+      secret_name : "password-google-integrate-b1"
+    })
+  )
+
+  depends_on = [
+    kubernetes_secret.password_google_integrate_b1
+  ]
+}
+
+resource "kubernetes_manifest" "google_integrate_b2_deployment" {
+  manifest = yamldecode(
+    templatefile("google_integrate_deployment.yaml", {
+      buildbot_name : "google-integrate-b2",
+      secret_name : "password-google-integrate-b2"
+    })
+  )
+
+  depends_on = [
+    kubernetes_secret.password_google_integrate_b2
+  ]
 }
